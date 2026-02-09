@@ -1,0 +1,23 @@
+{
+  "name": "agentweb",
+  "version": "0.1.0",
+  "description": "Headless web rendering for AI agents",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "agentweb": "./cli.js"
+  },
+  "scripts": {
+    "test": "node test.js",
+    "render": "node cli.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["headless", "browser", "ai", "agent", "web"],
+  "author": "Clark (clark235)",
+  "license": "MIT"
+}
