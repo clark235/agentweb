@@ -253,8 +253,23 @@ function extractText(html) {
 
 /**
  * Fetch and parse a URL
+ * 
+ * @param {string} url
+ * @param {object} options
+ *   - timeoutMs: number     — fetch timeout (default 15000)
+ *   - _rawHtml: string      — pre-fetched HTML (skip network fetch, avoids double-fetch)
  */
 async function renderLite(url, options = {}) {
+    // If caller already fetched the HTML (e.g. smart-renderer doing SPA detection),
+    // skip the network fetch to avoid fetching twice.
+    if (options._rawHtml) {
+        const result = parseHTML(options._rawHtml, url);
+        result.httpStatus = 200;
+        result.contentType = 'text/html';
+        result.renderer = 'lite';
+        return result;
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
 
