@@ -26,6 +26,39 @@
 
 import { renderLite } from './lite-renderer.js';
 import { chunkPage, findRelevant, formatChunks } from './semantic-chunks.js';
+import { PageCache } from './cache.js';
+
+// ─── Module-level shared cache instance ─────────────────────────────────────
+// Shared across all render() calls in the same process.
+// TTL: 10 min for lite pages, 5 min for playwright (JS-heavy pages change faster)
+let _cache = null;
+
+function getCache() {
+  if (!_cache) {
+    _cache = new PageCache({
+      ttlMs: 10 * 60 * 1000,   // default 10 min
+      maxEntries: 200,
+      verbose: false,
+    });
+    // Purge expired on startup
+    _cache.purgeExpired();
+  }
+  return _cache;
+}
+
+/**
+ * Get cache statistics (for debugging/monitoring).
+ */
+export function cacheStats() {
+  return getCache().stats();
+}
+
+/**
+ * Invalidate cached entries for a URL.
+ */
+export function invalidateCache(url) {
+  return getCache().invalidate(url);
+}
 
 // ─── SPA Detection ──────────────────────────────────────────────────────────
 
@@ -294,7 +327,21 @@ export async function render(url, options = {}) {
         chunkLimit = 8,
         timeout = 15000,
         verbose = false,
+        noCache = false,
+        cacheTtlMs,
     } = options;
+
+    // ── Cache lookup ────────────────────────────────────────────────────────
+    const cache = getCache();
+    const cacheKey = query ?? '';
+
+    if (!noCache && !force) {
+        const cached = cache.get(url, cacheKey);
+        if (cached) {
+            if (verbose) console.error(`[smart-renderer] CACHE HIT ${url} q="${cacheKey}"`);
+            return { ...cached, cached: true, ms: Date.now() - t0 };
+        }
+    }
 
     // Step 1: Fetch raw HTML (always needed — for detection and/or lite renderer)
     let rawHtml, fetchStatus, contentType;
@@ -348,7 +395,16 @@ export async function render(url, options = {}) {
         return { url, backend: 'error', error: err.message, ms: Date.now() - t0 };
     }
 
-    return buildResult(url, backend, detection, data, query, chunkLimit, t0);
+    const result = buildResult(url, backend, detection, data, query, chunkLimit, t0);
+
+    // ── Cache store ─────────────────────────────────────────────────────────
+    if (!noCache && result.backend !== 'error') {
+        // Playwright pages are more dynamic — use shorter TTL
+        const ttl = cacheTtlMs ?? (backend === 'playwright' ? 5 * 60 * 1000 : 10 * 60 * 1000);
+        cache.set(url, cacheKey, result, ttl);
+    }
+
+    return result;
 }
 
 function buildResult(url, backend, detection, data, query, chunkLimit, t0) {
