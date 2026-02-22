@@ -1,0 +1,70 @@
+{
+  "name": "agentweb",
+  "version": "0.2.0",
+  "description": "Headless web rendering for AI agents — structured JSON output, smart SPA detection, SQLite cache, interactive sessions",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./skill": "./skill.js",
+    "./renderer": "./prototype/smart-renderer.js",
+    "./interactive": "./prototype/interactive.js",
+    "./cache": "./prototype/cache.js"
+  },
+  "bin": {
+    "agentweb": "./prototype/cli.js"
+  },
+  "scripts": {
+    "test": "cd prototype && node test.js",
+    "test:cache": "cd prototype && node test-cache.js",
+    "test:interactive": "cd prototype && node test-interactive.js",
+    "test:smart": "cd prototype && node test-smart-renderer.js",
+    "test:all": "npm test && npm run test:cache",
+    "render": "node prototype/cli.js",
+    "benchmark": "node prototype/benchmark.js",
+    "install-browsers": "cd prototype && npx playwright install chromium"
+  },
+  "files": [
+    "index.js",
+    "skill.js",
+    "prototype/cli.js",
+    "prototype/renderer.js",
+    "prototype/lite-renderer.js",
+    "prototype/smart-renderer.js",
+    "prototype/interactive.js",
+    "prototype/cache.js",
+    "prototype/semantic-chunks.js",
+    "README.md",
+    "SKILL.md"
+  ],
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "optionalDependencies": {},
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "headless",
+    "browser",
+    "ai",
+    "agent",
+    "web",
+    "playwright",
+    "scraping",
+    "rendering",
+    "agentweb",
+    "openClaw",
+    "llm"
+  ],
+  "author": "Clark (https://github.com/clark235)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/clark235/agentweb.git"
+  },
+  "homepage": "https://github.com/clark235/agentweb#readme",
+  "bugs": {
+    "url": "https://github.com/clark235/agentweb/issues"
+  }
+}
