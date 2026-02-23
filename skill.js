@@ -29,9 +29,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ─── Dynamic imports (Playwright optional) ───────────────────────────────────
 
 async function getRenderer() {
-  const { render: _render, renderSummary: _renderSummary, cacheStats: _cacheStats } =
+  const { render: _render, formatResult: _formatResult, cacheStats: _cacheStats } =
     await import('./prototype/smart-renderer.js');
-  return { render: _render, renderSummary: _renderSummary, cacheStats: _cacheStats };
+  return { render: _render, formatResult: _formatResult, cacheStats: _cacheStats };
 }
 
 async function getInteractiveSession() {
@@ -72,14 +72,15 @@ export async function render(url, options = {}) {
  * Render a page and return a human-readable markdown summary.
  *
  * @param {string} url
- * @param {string} [query] - Optional focus query
+ * @param {string|object} [queryOrOpts] - Optional focus query string or options object
  * @returns {string} Markdown-formatted summary
  */
-export async function renderSummary(url, query = '') {
+export async function renderSummary(url, queryOrOpts = '') {
   if (!url || typeof url !== 'string') throw new Error('renderSummary: url must be a non-empty string');
-  const { renderSummary: _renderSummary } = await getRenderer();
-  const result = await _renderSummary(url, { query });
-  return result;
+  const { render: _render, formatResult: _formatResult } = await getRenderer();
+  const opts = typeof queryOrOpts === 'string' ? { query: queryOrOpts } : queryOrOpts;
+  const result = await _render(url, opts);
+  return _formatResult(result);
 }
 
 /**
@@ -90,6 +91,8 @@ export async function cacheStats() {
   const { cacheStats: _cacheStats } = await getRenderer();
   return _cacheStats();
 }
+
+// (render is defined above as export async function render)
 
 // ─── Interactive Session API ─────────────────────────────────────────────────
 

@@ -8,14 +8,14 @@
  *   - Interactive sessions: click, type, form submission
  *
  * @example
- * import { render, renderSummary, InteractiveSession } from 'agentweb';
+ * import { render, formatResult, InteractiveSession } from 'agentweb';
  *
- * // One-shot render
- * const page = await render('https://news.ycombinator.com');
- * console.log(page.title, page.stats);
+ * // One-shot render (structured JSON)
+ * const result = await render('https://news.ycombinator.com');
+ * console.log(result.data.title, result.backend, result.ms);
  *
  * // Human-readable summary
- * const summary = await renderSummary('https://example.com');
+ * const summary = formatResult(result);
  *
  * // Interactive session
  * const session = new InteractiveSession();
@@ -26,6 +26,7 @@
  * await session.close();
  */
 
-export { render, renderSummary, cacheStats, invalidateCache } from './prototype/smart-renderer.js';
+export { render, formatResult, cacheStats, invalidateCache, detectSPA } from './prototype/smart-renderer.js';
 export { InteractiveSession } from './prototype/interactive.js';
 export { PageCache } from './prototype/cache.js';
+export { renderLite, parseHTML, formatSummary as formatLiteSummary } from './prototype/lite-renderer.js';
