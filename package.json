@@ -9,7 +9,9 @@
     "./skill": "./skill.js",
     "./renderer": "./prototype/smart-renderer.js",
     "./interactive": "./prototype/interactive.js",
-    "./cache": "./prototype/cache.js"
+    "./cache": "./prototype/cache.js",
+    "./diff-tracker": "./prototype/diff-tracker.js",
+    "./watch-server": "./prototype/watch-server.js"
   },
   "bin": {
     "agentweb": "./prototype/cli.js"
@@ -17,10 +19,14 @@
   "scripts": {
     "test": "cd prototype && node test.js",
     "test:cache": "cd prototype && node test-cache.js",
-    "test:interactive": "cd prototype && node test-interactive.js",
+    "test:interactive": "cd prototype && node test-interactive.js --headed=false",
     "test:smart": "cd prototype && node test-smart-renderer.js",
-    "test:all": "npm test && npm run test:cache",
+    "test:diff": "node prototype/test-diff-tracker.js",
+    "test:watch-server": "node prototype/test-watch-server.js",
+    "test:integration": "node prototype/test-integration-pipeline.js",
+    "test:all": "npm test && npm run test:cache && npm run test:diff && npm run test:watch-server && npm run test:integration",
     "render": "node prototype/cli.js",
+    "watch-server": "node prototype/watch-server.js",
     "benchmark": "node prototype/benchmark.js",
     "install-browsers": "cd prototype && npx playwright install chromium"
   },
@@ -34,6 +40,9 @@
     "prototype/interactive.js",
     "prototype/cache.js",
     "prototype/semantic-chunks.js",
+    "prototype/diff-tracker.js",
+    "prototype/watch-server.js",
+    "prototype/test-integration-pipeline.js",
     "README.md",
     "SKILL.md"
   ],
