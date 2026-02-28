@@ -8,16 +8,24 @@
  *   const { render, renderSummary, session } = await import('./ventures/agentweb/skill.js');
  *
  * Tool functions:
- *   render(url, options?)        — render page to structured JSON
- *   renderSummary(url)           — human-readable page summary
- *   sessionOpen(url)             — start an interactive session
- *   sessionClick(id, elementId)  — click an element
- *   sessionType(id, el, text)    — type into a field
- *   sessionPress(id, key)        — press a key (Enter, Tab, Escape...)
- *   sessionGoto(id, url)         — navigate to a new URL
- *   sessionScroll(id, dir)       — scroll up or down
- *   sessionSnapshot(id)          — get current page state
- *   sessionClose(id)             — close the session
+ *   render(url, options?)               — render page to structured JSON
+ *   renderSummary(url)                  — human-readable page summary
+ *   sessionOpen(url)                    — start an interactive session
+ *   sessionClick(id, elementId)         — click an element
+ *   sessionType(id, el, text)           — type into a field
+ *   sessionFillForm(id, data, opts)     — fill all form fields at once
+ *   sessionSelect(id, elementId, value) — select dropdown value
+ *   sessionPress(id, key)               — press a key (Enter, Tab, Escape...)
+ *   sessionGoto(id, url)                — navigate to a new URL
+ *   sessionBack(id)                     — go back in history
+ *   sessionForward(id)                  — go forward in history
+ *   sessionScroll(id, dir)              — scroll up or down
+ *   sessionSnapshot(id)                 — get current page state
+ *   sessionWaitForText(id, text, opts)  — wait for text to appear
+ *   sessionWaitForSelector(id, sel)     — wait for element to appear
+ *   sessionExtractText(id, sel, opts)   — extract text from elements
+ *   sessionEvaluate(id, fn)             — run JS in page context
+ *   sessionClose(id)                    — close the session
  */
 
 import { createRequire } from 'module';
@@ -160,6 +168,34 @@ export async function sessionPress(sessionId, key) {
 }
 
 /**
+ * Fill an entire form at once.
+ *
+ * @param {string} sessionId
+ * @param {object} data - Field name → value mapping (e.g. { username: 'alice', email: '...' })
+ * @param {object} [opts]
+ * @param {boolean} [opts.submit=false] - Press Enter after filling
+ * @param {string} [opts.submitSelector] - CSS selector for submit button
+ * @returns {{ filled: string[], skipped: string[], state: object }}
+ */
+export async function sessionFillForm(sessionId, data, opts = {}) {
+  const sess = _getSession(sessionId);
+  return await sess.fillForm(data, opts);
+}
+
+/**
+ * Select a value in a <select> dropdown.
+ *
+ * @param {string} sessionId
+ * @param {number} elementId - Element ID from snapshot
+ * @param {string|string[]} value - Option value(s) to select
+ * @returns {object} New page state
+ */
+export async function sessionSelect(sessionId, elementId, value) {
+  const sess = _getSession(sessionId);
+  return await sess.select(Number(elementId), value);
+}
+
+/**
  * Navigate to a new URL in an existing session (preserving cookies/state).
  *
  * @param {string} sessionId
@@ -169,6 +205,90 @@ export async function sessionPress(sessionId, key) {
 export async function sessionGoto(sessionId, url) {
   const sess = _getSession(sessionId);
   return await sess.goto(url);
+}
+
+/**
+ * Go back in browser history.
+ *
+ * @param {string} sessionId
+ * @returns {object} New page state
+ */
+export async function sessionBack(sessionId) {
+  const sess = _getSession(sessionId);
+  return await sess.back();
+}
+
+/**
+ * Go forward in browser history.
+ *
+ * @param {string} sessionId
+ * @returns {object} New page state
+ */
+export async function sessionForward(sessionId) {
+  const sess = _getSession(sessionId);
+  return await sess.forward();
+}
+
+/**
+ * Wait for text to appear on the page.
+ *
+ * @param {string} sessionId
+ * @param {string} text - Text to wait for
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs=10000]
+ * @returns {object} Page snapshot when text is found
+ */
+export async function sessionWaitForText(sessionId, text, opts = {}) {
+  const sess = _getSession(sessionId);
+  return await sess.waitForText(text, opts);
+}
+
+/**
+ * Wait for a CSS selector to appear in the DOM.
+ *
+ * @param {string} sessionId
+ * @param {string} selector - CSS selector to wait for
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs=10000]
+ * @returns {object} Page snapshot when element is found
+ */
+export async function sessionWaitForSelector(sessionId, selector, opts = {}) {
+  const sess = _getSession(sessionId);
+  return await sess.waitForSelector(selector, opts);
+}
+
+/**
+ * Extract text from specific elements by CSS selector.
+ *
+ * @param {string} sessionId
+ * @param {string} selector - CSS selector
+ * @param {object} [opts]
+ * @param {boolean} [opts.all=false] - Return all matching elements
+ * @returns {string|string[]|null}
+ */
+export async function sessionExtractText(sessionId, selector, opts = {}) {
+  const sess = _getSession(sessionId);
+  return await sess.extractText(selector, opts);
+}
+
+/**
+ * Execute JavaScript in the page context.
+ *
+ * @param {string} sessionId
+ * @param {string} fnBody - Function body string (wrapped in `() => { ... }`)
+ * @returns {*} Return value (must be JSON-serializable)
+ *
+ * @example
+ * await sessionEvaluate(id, 'return document.title');
+ * await sessionEvaluate(id, 'return document.querySelectorAll("li").length');
+ */
+export async function sessionEvaluate(sessionId, fnBody) {
+  const sess = _getSession(sessionId);
+  // Accept either a string expression or function body
+  const fn = typeof fnBody === 'string'
+    ? new Function(fnBody)  // eslint-disable-line no-new-func
+    : fnBody;
+  return await sess.evaluate(fn);
 }
 
 /**
@@ -303,6 +423,82 @@ export const TOOLS = [
     },
   },
   {
+    name: 'agentweb_session_back',
+    description: 'Go back in browser history.',
+    fn: sessionBack,
+    params: {
+      sessionId: { type: 'string', required: true },
+    },
+  },
+  {
+    name: 'agentweb_session_forward',
+    description: 'Go forward in browser history.',
+    fn: sessionForward,
+    params: {
+      sessionId: { type: 'string', required: true },
+    },
+  },
+  {
+    name: 'agentweb_session_fill_form',
+    description: 'Fill all fields in a form at once. Matches by name, id, placeholder, or aria-label.',
+    fn: sessionFillForm,
+    params: {
+      sessionId: { type: 'string', required: true },
+      data: { type: 'object', required: true, description: 'Field name → value mapping, e.g. { username: "alice", email: "..." }' },
+      submit: { type: 'boolean', required: false, description: 'Press Enter after filling (default: false)' },
+      submitSelector: { type: 'string', required: false, description: 'CSS selector for submit button to click after filling' },
+    },
+  },
+  {
+    name: 'agentweb_session_select',
+    description: 'Select a value in a <select> dropdown element.',
+    fn: sessionSelect,
+    params: {
+      sessionId: { type: 'string', required: true },
+      elementId: { type: 'number', required: true, description: 'Select element ID from snapshot' },
+      value: { type: 'string', required: true, description: 'Option value to select' },
+    },
+  },
+  {
+    name: 'agentweb_session_wait_for_text',
+    description: 'Wait for specific text to appear on the page (useful after async operations).',
+    fn: sessionWaitForText,
+    params: {
+      sessionId: { type: 'string', required: true },
+      text: { type: 'string', required: true, description: 'Text to wait for' },
+      timeoutMs: { type: 'number', required: false, description: 'Max wait time in ms (default: 10000)' },
+    },
+  },
+  {
+    name: 'agentweb_session_wait_for_selector',
+    description: 'Wait for a CSS selector to appear in the DOM.',
+    fn: sessionWaitForSelector,
+    params: {
+      sessionId: { type: 'string', required: true },
+      selector: { type: 'string', required: true, description: 'CSS selector to wait for' },
+      timeoutMs: { type: 'number', required: false, description: 'Max wait time in ms (default: 10000)' },
+    },
+  },
+  {
+    name: 'agentweb_session_extract_text',
+    description: 'Extract text content from specific elements by CSS selector.',
+    fn: sessionExtractText,
+    params: {
+      sessionId: { type: 'string', required: true },
+      selector: { type: 'string', required: true, description: 'CSS selector' },
+      all: { type: 'boolean', required: false, description: 'Return all matching elements (default: false = first only)' },
+    },
+  },
+  {
+    name: 'agentweb_session_evaluate',
+    description: 'Execute JavaScript in the page context. Return value must be JSON-serializable.',
+    fn: sessionEvaluate,
+    params: {
+      sessionId: { type: 'string', required: true },
+      fnBody: { type: 'string', required: true, description: 'JS function body, e.g. "return document.title"' },
+    },
+  },
+  {
     name: 'agentweb_session_scroll',
     description: 'Scroll the page in a browser session.',
     fn: sessionScroll,
@@ -349,9 +545,17 @@ export default {
   sessionOpen,
   sessionClick,
   sessionType,
+  sessionFillForm,
+  sessionSelect,
   sessionPress,
   sessionGoto,
+  sessionBack,
+  sessionForward,
   sessionScroll,
+  sessionWaitForText,
+  sessionWaitForSelector,
+  sessionExtractText,
+  sessionEvaluate,
   sessionSnapshot,
   sessionClose,
   sessionList,

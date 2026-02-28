@@ -30,3 +30,6 @@ export { render, formatResult, cacheStats, invalidateCache, detectSPA } from './
 export { InteractiveSession } from './prototype/interactive.js';
 export { PageCache } from './prototype/cache.js';
 export { renderLite, parseHTML, formatSummary as formatLiteSummary } from './prototype/lite-renderer.js';
+export { DiffTracker, buildSnapshot, computeDiff, formatDiff } from './prototype/diff-tracker.js';
+// WatchServer is a standalone daemon — import dynamically or run directly:
+// node prototype/watch-server.js --port=7376

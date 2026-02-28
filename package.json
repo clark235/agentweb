@@ -1,6 +1,6 @@
 {
   "name": "agentweb",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Headless web rendering for AI agents — structured JSON output, smart SPA detection, SQLite cache, interactive sessions",
   "type": "module",
   "main": "index.js",
@@ -11,6 +11,7 @@
     "./interactive": "./prototype/interactive.js",
     "./cache": "./prototype/cache.js",
     "./diff-tracker": "./prototype/diff-tracker.js",
+    "./playwright-diff": "./prototype/playwright-diff.js",
     "./watch-server": "./prototype/watch-server.js"
   },
   "bin": {
@@ -24,7 +25,8 @@
     "test:diff": "node prototype/test-diff-tracker.js",
     "test:watch-server": "node prototype/test-watch-server.js",
     "test:integration": "node prototype/test-integration-pipeline.js",
-    "test:all": "npm test && npm run test:cache && npm run test:diff && npm run test:watch-server && npm run test:integration",
+    "test:playwright-diff": "node prototype/test-playwright-diff.js",
+    "test:all": "npm test && npm run test:cache && npm run test:diff && npm run test:playwright-diff && npm run test:watch-server && npm run test:integration",
     "render": "node prototype/cli.js",
     "watch-server": "node prototype/watch-server.js",
     "benchmark": "node prototype/benchmark.js",
@@ -41,6 +43,7 @@
     "prototype/cache.js",
     "prototype/semantic-chunks.js",
     "prototype/diff-tracker.js",
+    "prototype/playwright-diff.js",
     "prototype/watch-server.js",
     "prototype/test-integration-pipeline.js",
     "README.md",
