@@ -1,6 +1,6 @@
 {
   "name": "agentweb",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Headless web rendering for AI agents — structured JSON output, smart SPA detection, SQLite cache, interactive sessions",
   "type": "module",
   "main": "index.js",
@@ -12,7 +12,8 @@
     "./cache": "./prototype/cache.js",
     "./diff-tracker": "./prototype/diff-tracker.js",
     "./playwright-diff": "./prototype/playwright-diff.js",
-    "./watch-server": "./prototype/watch-server.js"
+    "./watch-server": "./prototype/watch-server.js",
+    "./playwright-watch-server": "./prototype/playwright-watch-server.js"
   },
   "bin": {
     "agentweb": "./prototype/cli.js"
@@ -26,9 +27,11 @@
     "test:watch-server": "node prototype/test-watch-server.js",
     "test:integration": "node prototype/test-integration-pipeline.js",
     "test:playwright-diff": "node prototype/test-playwright-diff.js",
-    "test:all": "npm test && npm run test:cache && npm run test:diff && npm run test:playwright-diff && npm run test:watch-server && npm run test:integration",
+    "test:playwright-watch-server": "node prototype/test-playwright-watch-server.js",
+    "test:all": "npm test && npm run test:cache && npm run test:diff && npm run test:playwright-diff && npm run test:watch-server && npm run test:playwright-watch-server && npm run test:integration",
     "render": "node prototype/cli.js",
     "watch-server": "node prototype/watch-server.js",
+    "playwright-watch-server": "node prototype/playwright-watch-server.js",
     "benchmark": "node prototype/benchmark.js",
     "install-browsers": "cd prototype && npx playwright install chromium"
   },
