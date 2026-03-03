@@ -7,6 +7,31 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.0] — 2026-03-03
+
+### Added
+
+- **Query history** (`GET /watches/:id/query-history`) — retrieve past queries and answers for a watched page
+  - Returns: `{ watchId, url, label, totalQueries, history[] }` — newest entries first
+  - Each history entry: `{ question, answer, timestamp, snapshotAge, relevantChunks, snapshotTitle }`
+  - `?limit=N` parameter (1–100, default 50) to paginate history
+  - History capped at 100 entries per watch (oldest evicted automatically)
+  - Entries stored as part of watch record state — survives page changes but not server restart
+  - 4 new tests in `test-watch-server.js` (now 29 total, all green)
+
+- **Semantic query endpoint** (`POST /watches/:id/query`) — ask natural-language questions about a watched page
+  - Body: `{ question: string, limit?: number, freshMs?: number }`
+  - Returns: `{ answer, relevantChunks[], numberContext?, snapshotTitle, snapshotTimestamp, snapshotAge }`
+  - Purely algorithmic — no LLM required; uses `semantic-chunks.js` relevance scoring
+  - `freshMs` controls cache staleness before re-rendering (default: 5 minutes); pass `0` to always re-fetch
+  - Relevant chunks include `type`, `text`, `section`, `relevanceScore`
+  - If no relevant chunks found, returns descriptive fallback message
+  - `numberContext` field surfaces numeric data from the page (prices, counts, etc.)
+  - `queriesAnswered` metric added to `/metrics` endpoint
+  - 7 query tests in `test-watch-server.js`
+
+---
+
 ## [0.3.0] — 2026-03-01
 
 ### Added

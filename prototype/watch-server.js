@@ -17,6 +17,8 @@
  *   POST /watches/:id/snapshot           → take an immediate snapshot
  *   POST /watches/:id/baseline           → set current snapshot as new baseline
  *   GET  /watches/:id/diff               → get current diff vs baseline
+ *   POST /watches/:id/query              → semantic question answering against page content
+ *   GET  /watches/:id/query-history      → list past questions + answers for a watch (newest first)
  *   GET  /events                         → SSE stream of all change events
  *   GET  /watches/:id/events             → SSE stream for a specific watch
  *   GET  /metrics                        → Prometheus-style counters
@@ -25,6 +27,7 @@
 import { createServer } from 'http';
 import { DiffTracker } from './diff-tracker.js';
 import { render } from './smart-renderer.js';
+import { chunkPage, findRelevant, formatChunks } from './semantic-chunks.js';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -48,6 +51,7 @@ const watchSseClients = new Map();
 
 const metrics = {
   watchesCreated: 0,
+  queriesAnswered: 0,
   watchesDestroyed: 0,
   snapshotsTaken: 0,
   diffsComputed: 0,
@@ -102,6 +106,8 @@ function createWatch({ url, intervalMs = DEFAULT_INTERVAL, label = null }) {
     status: 'active',
     lastError: null,
     stop: null,
+    /** @type {Array<{question:string, answer:string, timestamp:number, snapshotAge:number, relevantChunks:number}>} */
+    queryHistory: [],
   };
 
   // Start the watcher
@@ -288,6 +294,8 @@ async function handleRequest(req, res) {
       `agentweb_changes_total ${metrics.changesDetected}`,
       `# HELP agentweb_errors_total Total errors`,
       `agentweb_errors_total ${metrics.errors}`,
+      `# HELP agentweb_queries_total Total semantic queries answered`,
+      `agentweb_queries_total ${metrics.queriesAnswered}`,
       `# HELP agentweb_uptime_seconds Server uptime in seconds`,
       `agentweb_uptime_seconds ${Math.floor((Date.now() - metrics.startedAt) / 1000)}`,
     ];
@@ -417,6 +425,130 @@ async function handleRequest(req, res) {
   }
 
   // DELETE /watches/:id
+    // POST /watches/:id/query — semantic question answering against page content
+  //
+  // Body: { question: string, limit?: number, freshMs?: number }
+  //
+  // Returns the most relevant chunks from the latest snapshot that relate to the
+  // question, plus a synthesized plain-text answer built from those chunks.
+  // No LLM required — purely algorithmic relevance scoring via semantic-chunks.js.
+  //
+  // The `freshMs` parameter controls how stale the cached snapshot can be before
+  // we re-render the page (default: 5 minutes). Pass 0 to always re-render.
+  if (method === 'POST' && (params = routeMatch('/watches/:id/query', path))) {
+    const record = watches.get(params.id);
+    if (!record) return json(res, 404, { error: 'Watch not found' });
+
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+
+    const { question, limit = 6, freshMs = 5 * 60 * 1000 } = body;
+    if (!question || typeof question !== 'string' || !question.trim()) {
+      return json(res, 400, { error: 'body.question (non-empty string) is required' });
+    }
+
+    // Use the cached baseline snapshot if fresh enough; otherwise re-render
+    let snapshot = record.baseline;
+    const snapshotAge = snapshot ? Date.now() - snapshot.timestamp : Infinity;
+    const needsFresh = !snapshot || snapshotAge > freshMs;
+
+    if (needsFresh) {
+      try {
+        snapshot = await tracker.snapshot(record.url);
+        record.baseline = snapshot;
+        tracker.setBaseline(record.url, snapshot);
+        record.lastCheckedAt = Date.now();
+        metrics.snapshotsTaken++;
+      } catch (e) {
+        metrics.errors++;
+        return json(res, 500, { error: `Failed to fetch page: ${e.message}` });
+      }
+    }
+
+    // Build a page-like object that chunkPage can consume
+    // DiffTracker snapshots carry a `textSample` + structured fields
+    const pageForChunking = {
+      url: snapshot.url,
+      title: snapshot.title,
+      headings: snapshot.headings.map((text, i) => ({ level: 1, text })),
+      textContent: snapshot.textSample || '',
+      stats: snapshot.stats,
+      links: snapshot.links,
+    };
+
+    const chunks = chunkPage(pageForChunking, { minScore: -3 });
+    const relevant = findRelevant(chunks, question.trim(), Math.max(1, Math.min(20, limit)));
+
+    // Synthesize a concise answer from the most relevant chunks
+    // We build a structured response rather than free text — agents can parse this
+    const answerParts = relevant
+      .filter(c => c.relevance > 0)
+      .slice(0, 4)
+      .map(c => c.text.trim());
+
+    const answer = answerParts.length > 0
+      ? answerParts.join('\n\n')
+      : `No content found on ${snapshot.title || record.url} that matches "${question}".`;
+
+    // Summarize what numbers/data were on the page (useful for numeric questions)
+    const numberContext = snapshot.numbers?.length
+      ? `Numbers/values found on page: ${snapshot.numbers.slice(0, 20).join(', ')}`
+      : null;
+
+    metrics.queriesAnswered++;
+
+    const responsePayload = {
+      watchId: record.id,
+      url: record.url,
+      question,
+      answer,
+      relevantChunks: relevant.map(c => ({
+        type: c.type,
+        text: c.text,
+        section: c.section,
+        relevanceScore: c.relevance,
+      })),
+      ...(numberContext ? { numberContext } : {}),
+      snapshotAge: needsFresh ? 0 : snapshotAge,
+      snapshotTitle: snapshot.title,
+      snapshotTimestamp: snapshot.timestamp,
+    };
+
+    // Append to query history (keep last 100 entries)
+    record.queryHistory.push({
+      question,
+      answer,
+      timestamp: Date.now(),
+      snapshotAge: responsePayload.snapshotAge,
+      relevantChunks: relevant.length,
+      snapshotTitle: snapshot.title,
+    });
+    if (record.queryHistory.length > 100) record.queryHistory.shift();
+
+    return json(res, 200, responsePayload);
+  }
+
+  // ── GET /watches/:id/query-history ──
+  if (method === 'GET' && (params = routeMatch('/watches/:id/query-history', path))) {
+    const record = watches.get(params.id);
+    if (!record) return json(res, 404, { error: 'Watch not found' });
+
+    const url = new URL(req.url, `http://${HOST}`);
+    const limitParam = parseInt(url.searchParams.get('limit') || '50', 10);
+    const limit = Math.max(1, Math.min(100, isNaN(limitParam) ? 50 : limitParam));
+
+    // Return most recent entries first
+    const history = record.queryHistory.slice(-limit).reverse();
+
+    return json(res, 200, {
+      watchId: record.id,
+      url: record.url,
+      label: record.label,
+      totalQueries: record.queryHistory.length,
+      history,
+    });
+  }
+
   if (method === 'DELETE' && (params = routeMatch('/watches/:id', path))) {
     const stopped = stopWatch(params.id);
     if (!stopped) return json(res, 404, { error: 'Watch not found' });
@@ -437,6 +569,8 @@ async function handleRequest(req, res) {
       'POST /watches/:id/snapshot',
       'POST /watches/:id/baseline',
       'GET  /watches/:id/diff',
+      'POST /watches/:id/query',
+      'GET  /watches/:id/query-history',
       'GET  /watches/:id/events',
     ],
   });

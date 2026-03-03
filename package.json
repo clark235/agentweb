@@ -1,6 +1,6 @@
 {
   "name": "agentweb",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Headless web rendering for AI agents — structured JSON output, smart SPA detection, SQLite cache, interactive sessions",
   "type": "module",
   "main": "index.js",

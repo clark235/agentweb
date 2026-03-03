@@ -7,6 +7,7 @@
 
 import { createServer } from 'http';
 import { DiffTracker, buildSnapshot } from './diff-tracker.js';
+import { chunkPage, findRelevant } from './semantic-chunks.js';
 
 // ─── Test Harness ─────────────────────────────────────────────────────────────
 
@@ -83,7 +84,7 @@ async function startTestServer() {
   const watches = new Map();
   const globalSseClients = new Set();
   const watchSseClients = new Map();
-  const metrics = { watchesCreated: 0, watchesDestroyed: 0, snapshotsTaken: 0, diffsComputed: 0, changesDetected: 0, errors: 0, startedAt: Date.now() };
+  const metrics = { watchesCreated: 0, watchesDestroyed: 0, snapshotsTaken: 0, diffsComputed: 0, changesDetected: 0, errors: 0, queriesAnswered: 0, startedAt: Date.now() };
 
   let _id = 0;
   const newId = () => `tw${Date.now().toString(36)}${(++_id).toString(36)}`;
@@ -216,6 +217,94 @@ async function startTestServer() {
       const record = watches.get(params.id);
       if (!record) return json(res, 404, { error: 'Watch not found' });
       return json(res, 200, { watch: serialize(record) });
+    }
+
+    if (method === 'POST' && (params = routeMatch('/watches/:id/query', path))) {
+      const record = watches.get(params.id);
+      if (!record) return json(res, 404, { error: 'Watch not found' });
+      let body;
+      try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+      const { question, limit = 6, freshMs = 5 * 60 * 1000 } = body;
+      if (!question || typeof question !== 'string' || !question.trim()) {
+        return json(res, 400, { error: 'body.question (non-empty string) is required' });
+      }
+      let snapshot = record.baseline;
+      const snapshotAge = snapshot ? Date.now() - snapshot.timestamp : Infinity;
+      const needsFresh = !snapshot || snapshotAge > freshMs;
+      if (needsFresh) {
+        try {
+          snapshot = await tracker.snapshot(record.url);
+          record.baseline = snapshot;
+          tracker.setBaseline(record.url, snapshot);
+          record.lastCheckedAt = Date.now();
+          metrics.snapshotsTaken++;
+        } catch (e) {
+          metrics.errors++;
+          return json(res, 500, { error: `Failed to fetch page: ${e.message}` });
+        }
+      }
+      const pageForChunking = {
+        url: snapshot.url,
+        title: snapshot.title,
+        headings: snapshot.headings.map(text => ({ level: 1, text })),
+        textContent: snapshot.textSample || '',
+        stats: snapshot.stats,
+        links: snapshot.links,
+      };
+      const chunks = chunkPage(pageForChunking, { minScore: -3 });
+      const relevant = findRelevant(chunks, question.trim(), Math.max(1, Math.min(20, limit)));
+      const answerParts = relevant.filter(c => c.relevance > 0).slice(0, 4).map(c => c.text.trim());
+      const answer = answerParts.length > 0
+        ? answerParts.join('\n\n')
+        : `No content found on ${snapshot.title || record.url} that matches "${question}".`;
+      const numberContext = snapshot.numbers?.length
+        ? `Numbers/values found on page: ${snapshot.numbers.slice(0, 20).join(', ')}`
+        : null;
+      metrics.queriesAnswered++;
+      const responsePayload = {
+        watchId: record.id,
+        url: record.url,
+        question,
+        answer,
+        relevantChunks: relevant.map(c => ({
+          type: c.type,
+          text: c.text,
+          section: c.section,
+          relevanceScore: c.relevance,
+        })),
+        ...(numberContext ? { numberContext } : {}),
+        snapshotAge: needsFresh ? 0 : snapshotAge,
+        snapshotTitle: snapshot.title,
+        snapshotTimestamp: snapshot.timestamp,
+      };
+      // Track query history
+      if (!record.queryHistory) record.queryHistory = [];
+      record.queryHistory.push({
+        question,
+        answer,
+        timestamp: Date.now(),
+        snapshotAge: responsePayload.snapshotAge,
+        relevantChunks: relevant.length,
+        snapshotTitle: snapshot.title,
+      });
+      if (record.queryHistory.length > 100) record.queryHistory.shift();
+      return json(res, 200, responsePayload);
+    }
+
+    if (method === 'GET' && (params = routeMatch('/watches/:id/query-history', path))) {
+      const record = watches.get(params.id);
+      if (!record) return json(res, 404, { error: 'Watch not found' });
+      const urlObj = new URL(req.url, `http://127.0.0.1`);
+      const limitParam = parseInt(urlObj.searchParams.get('limit') || '50', 10);
+      const limit = Math.max(1, Math.min(100, isNaN(limitParam) ? 50 : limitParam));
+      const history = (record.queryHistory || []).slice(-limit).reverse();
+      return json(res, 200, {
+        watchId: record.id,
+        url: record.url,
+        label: record.label,
+        totalQueries: (record.queryHistory || []).length,
+        history,
+      });
     }
 
     if (method === 'DELETE' && (params = routeMatch('/watches/:id', path))) {
@@ -449,6 +538,173 @@ const TESTS = [
   test('404 for unknown routes', async () => {
     const r = await api('GET', '/unknown/route');
     assertEqual(r.status, 404);
+  }),
+
+  // ── Query endpoint ───────────────────────────────────────────────────────────
+
+  test('POST /watches/:id/query returns answer and relevant chunks', async () => {
+    _mockVersion = 2;
+    const createR = await api('POST', '/watches', { url: 'https://query-test.example.com' });
+    const id = createR.body.watch.id;
+    await waitForBaseline(id);
+
+    const r = await api('POST', `/watches/${id}/query`, { question: 'what is on this page' });
+    assertEqual(r.status, 200);
+    assert(r.body.watchId === id, 'watchId matches');
+    assert(typeof r.body.answer === 'string' && r.body.answer.length > 0, 'has answer string');
+    assert(Array.isArray(r.body.relevantChunks), 'has relevantChunks array');
+    assert(typeof r.body.snapshotTimestamp === 'number', 'has snapshotTimestamp');
+    assert(typeof r.body.question === 'string', 'echoes question');
+    assertEqual(r.body.question, 'what is on this page');
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('POST /watches/:id/query 400 if question missing', async () => {
+    const createR = await api('POST', '/watches', { url: 'https://q2.example.com' });
+    const id = createR.body.watch.id;
+    const r = await api('POST', `/watches/${id}/query`, {});
+    assertEqual(r.status, 400);
+    assert(r.body.error.includes('question'), 'error mentions question');
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('POST /watches/:id/query 400 if question is empty string', async () => {
+    const createR = await api('POST', '/watches', { url: 'https://q3.example.com' });
+    const id = createR.body.watch.id;
+    const r = await api('POST', `/watches/${id}/query`, { question: '   ' });
+    assertEqual(r.status, 400);
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('POST /watches/:id/query 404 on unknown watch', async () => {
+    const r = await api('POST', '/watches/no-such-watch/query', { question: 'anything' });
+    assertEqual(r.status, 404);
+  }),
+
+  test('POST /watches/:id/query uses fresh snapshot when no baseline yet', async () => {
+    // Create a watch but don't wait for baseline
+    _mockVersion = 3;
+    const createR = await api('POST', '/watches', { url: 'https://q4.example.com' });
+    const id = createR.body.watch.id;
+
+    // Query immediately (may or may not have baseline yet)
+    const r = await api('POST', `/watches/${id}/query`, { question: 'price content version' });
+    // Should succeed in any case (query takes its own snapshot if needed)
+    assertEqual(r.status, 200, `Expected 200, got ${r.status}: ${JSON.stringify(r.body)}`);
+    assert(typeof r.body.answer === 'string', 'has answer');
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('POST /watches/:id/query relevant chunks contain scored results', async () => {
+    _mockVersion = 7;
+    const createR = await api('POST', '/watches', { url: 'https://q5.example.com' });
+    const id = createR.body.watch.id;
+    await waitForBaseline(id);
+
+    // Ask about price — mock page has "Price: $17.00" in its content
+    const r = await api('POST', `/watches/${id}/query`, { question: 'price', limit: 3 });
+    assertEqual(r.status, 200);
+    assert(r.body.relevantChunks.length <= 3, 'respects limit');
+    for (const chunk of r.body.relevantChunks) {
+      assert(typeof chunk.type === 'string', 'chunk has type');
+      assert(typeof chunk.text === 'string', 'chunk has text');
+      assert(typeof chunk.relevanceScore === 'number', 'chunk has relevanceScore');
+    }
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('POST /watches/:id/query answer contains page content for matching question', async () => {
+    _mockVersion = 4;
+    const createR = await api('POST', '/watches', { url: 'https://q6.example.com' });
+    const id = createR.body.watch.id;
+    await waitForBaseline(id);
+
+    // Question targets content that mock page produces
+    const r = await api('POST', `/watches/${id}/query`, { question: 'mock page content version' });
+    assertEqual(r.status, 200);
+    // Answer should contain something relevant (mock page always has "Mock Page v{n}" in title)
+    const answer = r.body.answer.toLowerCase() + r.body.relevantChunks.map(c => c.text).join(' ').toLowerCase();
+    assert(answer.includes('mock') || answer.includes('page') || answer.includes('content'), 'answer references page content');
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  // ─── Query History ──────────────────────────────────────────────────────────
+
+  test('GET /watches/:id/query-history returns empty history initially', async () => {
+    const createR = await api('POST', '/watches', { url: 'https://qh1.example.com' });
+    assert(createR.status === 200 || createR.status === 201, `create status ${createR.status}`);
+    const id = createR.body.watch.id;
+
+    const r = await api('GET', `/watches/${id}/query-history`);
+    assertEqual(r.status, 200, 'status 200');
+    assert(Array.isArray(r.body.history), 'history is array');
+    assertEqual(r.body.history.length, 0, 'empty initially');
+    assertEqual(r.body.totalQueries, 0, 'totalQueries is 0');
+    assertEqual(r.body.watchId, id, 'watchId matches');
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('GET /watches/:id/query-history records queries in order, newest first', async () => {
+    _mockVersion = 5;
+    const createR = await api('POST', '/watches', { url: 'https://qh2.example.com' });
+    assert(createR.status === 200 || createR.status === 201, `create status ${createR.status}`);
+    const id = createR.body.watch.id;
+    await waitForBaseline(id);
+
+    // Submit 3 queries
+    await api('POST', `/watches/${id}/query`, { question: 'first question' });
+    await api('POST', `/watches/${id}/query`, { question: 'second question' });
+    await api('POST', `/watches/${id}/query`, { question: 'third question' });
+
+    const r = await api('GET', `/watches/${id}/query-history`);
+    assertEqual(r.status, 200, 'status 200');
+    assertEqual(r.body.totalQueries, 3, '3 total queries');
+    assertEqual(r.body.history.length, 3, '3 entries in history');
+
+    // Newest first
+    assertEqual(r.body.history[0].question, 'third question', 'newest first');
+    assertEqual(r.body.history[1].question, 'second question', 'second entry');
+    assertEqual(r.body.history[2].question, 'first question', 'oldest last');
+
+    // Each entry has required fields
+    const entry = r.body.history[0];
+    assert(typeof entry.question === 'string', 'has question');
+    assert(typeof entry.answer === 'string', 'has answer');
+    assert(typeof entry.timestamp === 'number', 'has timestamp');
+    assert(typeof entry.relevantChunks === 'number', 'has relevantChunks count');
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('GET /watches/:id/query-history respects ?limit param', async () => {
+    _mockVersion = 6;
+    const createR = await api('POST', '/watches', { url: 'https://qh3.example.com' });
+    const id = createR.body.watch.id;
+    await waitForBaseline(id);
+
+    // Submit 5 queries
+    for (let i = 1; i <= 5; i++) {
+      await api('POST', `/watches/${id}/query`, { question: `question ${i}` });
+    }
+
+    // Request only last 2
+    const r = await api('GET', `/watches/${id}/query-history?limit=2`);
+    assertEqual(r.status, 200, 'status 200');
+    assertEqual(r.body.totalQueries, 5, 'totalQueries reflects all 5');
+    assertEqual(r.body.history.length, 2, 'only 2 returned due to limit');
+    assertEqual(r.body.history[0].question, 'question 5', 'most recent first');
+
+    await api('DELETE', `/watches/${id}`);
+  }),
+
+  test('GET /watches/:id/query-history 404 on unknown watch', async () => {
+    const r = await api('GET', '/watches/no-such-watch/query-history');
+    assertEqual(r.status, 404, 'status 404');
   }),
 ];
 
