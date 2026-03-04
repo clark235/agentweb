@@ -313,6 +313,116 @@ async function startTestServer() {
       return json(res, 200, { message: `Watch ${params.id} stopped` });
     }
 
+    // ── POST /render — one-shot render ──
+    if (method === 'POST' && path === '/render') {
+      let body;
+      try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+      if (!body.url) return json(res, 400, { error: 'body.url is required' });
+      try {
+        const raw = await mockRender(body.url);
+        metrics.snapshotsTaken++;
+        return json(res, 200, {
+          url: raw.url,
+          title: raw.data.title,
+          headings: raw.data.headings || [],
+          links: [],
+          forms: raw.data.forms || [],
+          textContent: (raw.data.text || '').slice(0, body.maxChars || 5000),
+          stats: {},
+          renderedAt: Date.now(),
+        });
+      } catch (e) {
+        metrics.errors++;
+        return json(res, 500, { error: `Render failed: ${e.message}` });
+      }
+    }
+
+    // ── POST /render/batch — batch render ──
+    if (method === 'POST' && path === '/render/batch') {
+      let body;
+      try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+      if (!Array.isArray(body.urls) || body.urls.length === 0) {
+        return json(res, 400, { error: 'body.urls must be a non-empty array of URLs' });
+      }
+      if (body.urls.length > 20) {
+        return json(res, 400, { error: 'Maximum 20 URLs per batch' });
+      }
+      const maxChars = body.maxChars || 5000;
+      const startTime = Date.now();
+      const results = await Promise.all(body.urls.map(async (url) => {
+        try {
+          const raw = await mockRender(url);
+          metrics.snapshotsTaken++;
+          return {
+            url: raw.url,
+            title: raw.data.title,
+            headings: raw.data.headings || [],
+            links: [],
+            forms: raw.data.forms || [],
+            textContent: (raw.data.text || '').slice(0, maxChars),
+            stats: {},
+            renderedAt: Date.now(),
+          };
+        } catch (e) {
+          metrics.errors++;
+          return { url, error: e.message, renderedAt: Date.now() };
+        }
+      }));
+      const timing = Date.now() - startTime;
+      const succeeded = results.filter(r => !r.error).length;
+      const failed = results.filter(r => r.error).length;
+      return json(res, 200, {
+        results,
+        summary: { total: body.urls.length, succeeded, failed, timingMs: timing },
+      });
+    }
+
+    // ── POST /extract — render + semantic chunking ──
+    if (method === 'POST' && path === '/extract') {
+      let body;
+      try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+      if (!body.url) return json(res, 400, { error: 'body.url is required' });
+      try {
+        const raw = await mockRender(body.url);
+        metrics.snapshotsTaken++;
+        const pageForChunking = {
+          url: raw.url,
+          title: raw.data.title,
+          headings: (raw.data.headings || []).map(h => typeof h === 'string' ? { level: 1, text: h } : h),
+          textContent: raw.data.text || '',
+          stats: {},
+          interactives: [],
+        };
+        const maxChunks = Math.max(1, Math.min(50, body.maxChunks || 10));
+        const chunks = chunkPage(pageForChunking, { minScore: -3 });
+        let resultChunks;
+        if (body.query && body.query.trim()) {
+          resultChunks = findRelevant(chunks, body.query.trim(), maxChunks);
+        } else {
+          resultChunks = chunks
+            .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+            .slice(0, maxChunks)
+            .map(c => ({ ...c, relevance: c.score ?? 0 }));
+        }
+        return json(res, 200, {
+          url: raw.url,
+          title: raw.data.title,
+          chunks: resultChunks.map(c => ({
+            type: c.type,
+            text: c.text,
+            section: c.section,
+            relevanceScore: c.relevance ?? c.score ?? 0,
+          })),
+          totalChunks: chunks.length,
+          query: body.query || null,
+          renderedAt: Date.now(),
+        });
+      } catch (e) {
+        metrics.errors++;
+        return json(res, 500, { error: `Extract failed: ${e.message}` });
+      }
+    }
+
     return json(res, 404, { error: 'Not found' });
   });
 
@@ -705,6 +815,128 @@ const TESTS = [
   test('GET /watches/:id/query-history 404 on unknown watch', async () => {
     const r = await api('GET', '/watches/no-such-watch/query-history');
     assertEqual(r.status, 404, 'status 404');
+  }),
+
+  // ─── One-shot Render ─────────────────────────────────────────────────────────
+
+  test('POST /render returns structured page data', async () => {
+    _mockVersion = 10;
+    const r = await api('POST', '/render', { url: 'https://render.example.com' });
+    assertEqual(r.status, 200);
+    assertEqual(r.body.url, 'https://render.example.com');
+    assertEqual(r.body.title, 'Mock Page v10');
+    assert(Array.isArray(r.body.headings), 'has headings');
+    assert(typeof r.body.textContent === 'string', 'has textContent');
+    assert(typeof r.body.renderedAt === 'number', 'has renderedAt timestamp');
+  }),
+
+  test('POST /render 400 if url missing', async () => {
+    const r = await api('POST', '/render', {});
+    assertEqual(r.status, 400);
+    assert(r.body.error.includes('url'));
+  }),
+
+  test('POST /render respects maxChars', async () => {
+    _mockVersion = 11;
+    const r = await api('POST', '/render', { url: 'https://maxchars.example.com', maxChars: 10 });
+    assertEqual(r.status, 200);
+    assert(r.body.textContent.length <= 10, `textContent should be ≤10 chars, got ${r.body.textContent.length}`);
+  }),
+
+  // ─── Batch Render ────────────────────────────────────────────────────────────
+
+  test('POST /render/batch renders multiple URLs', async () => {
+    _mockVersion = 20;
+    const r = await api('POST', '/render/batch', {
+      urls: ['https://batch1.example.com', 'https://batch2.example.com', 'https://batch3.example.com'],
+    });
+    assertEqual(r.status, 200);
+    assertEqual(r.body.results.length, 3, '3 results');
+    assertEqual(r.body.summary.total, 3);
+    assertEqual(r.body.summary.succeeded, 3);
+    assertEqual(r.body.summary.failed, 0);
+    assert(typeof r.body.summary.timingMs === 'number', 'has timing');
+
+    // Each result has URL and title
+    for (const result of r.body.results) {
+      assert(result.url, 'result has url');
+      assert(result.title, 'result has title');
+      assert(typeof result.renderedAt === 'number', 'result has renderedAt');
+    }
+  }),
+
+  test('POST /render/batch 400 if urls missing', async () => {
+    const r = await api('POST', '/render/batch', {});
+    assertEqual(r.status, 400);
+    assert(r.body.error.includes('urls'));
+  }),
+
+  test('POST /render/batch 400 if urls empty', async () => {
+    const r = await api('POST', '/render/batch', { urls: [] });
+    assertEqual(r.status, 400);
+  }),
+
+  test('POST /render/batch 400 if too many URLs', async () => {
+    const urls = Array.from({ length: 21 }, (_, i) => `https://too-many-${i}.com`);
+    const r = await api('POST', '/render/batch', { urls });
+    assertEqual(r.status, 400);
+    assert(r.body.error.includes('20'));
+  }),
+
+  test('POST /render/batch respects maxChars', async () => {
+    _mockVersion = 21;
+    const r = await api('POST', '/render/batch', {
+      urls: ['https://batchmc.example.com'],
+      maxChars: 5,
+    });
+    assertEqual(r.status, 200);
+    assert(r.body.results[0].textContent.length <= 5, 'maxChars respected');
+  }),
+
+  // ─── Extract ─────────────────────────────────────────────────────────────────
+
+  test('POST /extract returns chunks with relevance scores', async () => {
+    _mockVersion = 30;
+    const r = await api('POST', '/extract', { url: 'https://extract.example.com' });
+    assertEqual(r.status, 200);
+    assertEqual(r.body.url, 'https://extract.example.com');
+    assertEqual(r.body.title, 'Mock Page v30');
+    assert(Array.isArray(r.body.chunks), 'has chunks array');
+    assert(typeof r.body.totalChunks === 'number', 'has totalChunks');
+    assertEqual(r.body.query, null, 'query is null when not provided');
+
+    for (const chunk of r.body.chunks) {
+      assert(typeof chunk.type === 'string', 'chunk has type');
+      assert(typeof chunk.text === 'string', 'chunk has text');
+      assert(typeof chunk.relevanceScore === 'number', 'chunk has relevanceScore');
+    }
+  }),
+
+  test('POST /extract with query scores chunks by relevance', async () => {
+    _mockVersion = 31;
+    const r = await api('POST', '/extract', {
+      url: 'https://extract-q.example.com',
+      query: 'price content',
+    });
+    assertEqual(r.status, 200);
+    assertEqual(r.body.query, 'price content');
+    assert(r.body.chunks.length > 0, 'has some chunks');
+  }),
+
+  test('POST /extract 400 if url missing', async () => {
+    const r = await api('POST', '/extract', {});
+    assertEqual(r.status, 400);
+    assert(r.body.error.includes('url'));
+  }),
+
+  test('POST /extract respects maxChunks', async () => {
+    _mockVersion = 32;
+    const r = await api('POST', '/extract', {
+      url: 'https://extract-mc.example.com',
+      maxChunks: 2,
+    });
+    assertEqual(r.status, 200);
+    assert(r.body.chunks.length <= 2, `maxChunks=2 but got ${r.body.chunks.length}`);
   }),
 ];
 

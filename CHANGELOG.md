@@ -7,6 +7,40 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.0] — 2026-03-04
+
+### Added
+
+- **One-shot render endpoint** (`POST /render`) — render a single URL without creating a watch
+  - Returns: `{ url, title, headings, links, forms, textContent, stats, renderedAt }`
+  - `maxChars` parameter to truncate text content (default: 5000)
+  - No state created — fire-and-forget page reads for agents
+
+- **Batch render endpoint** (`POST /render/batch`) — render up to 20 URLs in parallel
+  - Body: `{ urls: string[], maxChars?: number, concurrency?: number }`
+  - Returns: `{ results[], summary: { total, succeeded, failed, timingMs } }`
+  - Failed URLs return `{ url, error }` instead of failing the batch
+  - Configurable concurrency (default: 5, max: 10)
+  - Ideal for agents comparing multiple pages or monitoring lists of URLs
+
+- **Structured extraction endpoint** (`POST /extract`) — render + semantic chunking in one call
+  - Body: `{ url: string, query?: string, maxChunks?: number }`
+  - Returns: `{ url, title, chunks[], totalChunks, query, renderedAt }`
+  - If `query` provided, chunks are scored for relevance to the question
+  - If no query, returns top chunks by general importance score
+  - No LLM required — uses algorithmic relevance scoring from `semantic-chunks.js`
+
+- **12 new tests** in `test-watch-server.js` (now 41 total, all green)
+  - `POST /render`: basic render, missing url 400, maxChars support
+  - `POST /render/batch`: multi-URL render, empty/missing/too-many validation, maxChars
+  - `POST /extract`: chunk extraction, query relevance, missing url, maxChunks
+
+### Fixed
+
+- `playwright-watch-server.js` was missing from package.json `files` array (would be excluded from npm publish)
+
+---
+
 ## [0.4.0] — 2026-03-03
 
 ### Added

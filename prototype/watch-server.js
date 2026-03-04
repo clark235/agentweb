@@ -19,6 +19,9 @@
  *   GET  /watches/:id/diff               → get current diff vs baseline
  *   POST /watches/:id/query              → semantic question answering against page content
  *   GET  /watches/:id/query-history      → list past questions + answers for a watch (newest first)
+ *   POST /render                          → one-shot render (no watch, no state)
+ *   POST /render/batch                    → render up to 20 URLs in parallel
+ *   POST /extract                         → render + semantic chunking with relevance
  *   GET  /events                         → SSE stream of all change events
  *   GET  /watches/:id/events             → SSE stream for a specific watch
  *   GET  /metrics                        → Prometheus-style counters
@@ -555,6 +558,183 @@ async function handleRequest(req, res) {
     return json(res, 200, { message: `Watch ${params.id} stopped and removed` });
   }
 
+  // ── POST /render — one-shot render (no watch, no state) ──
+  //
+  // Renders a single URL and returns structured data immediately.
+  // No watch is created. Good for quick one-off page reads.
+  //
+  // Body: { url: string }
+  // Returns: { url, title, headings, links, textContent, stats, renderedAt }
+  if (method === 'POST' && path === '/render') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    if (!body.url) return json(res, 400, { error: 'body.url is required' });
+
+    try {
+      const raw = await render(body.url);
+      metrics.snapshotsTaken++;
+      return json(res, 200, {
+        url: raw.url || body.url,
+        title: raw.title,
+        headings: raw.headings || [],
+        links: (raw.interactives || []).filter(el => el.tag === 'a').slice(0, 50),
+        forms: raw.forms || [],
+        textContent: (raw.textContent || '').slice(0, body.maxChars || 5000),
+        stats: raw.stats || {},
+        renderedAt: Date.now(),
+      });
+    } catch (e) {
+      metrics.errors++;
+      return json(res, 500, { error: `Render failed: ${e.message}` });
+    }
+  }
+
+  // ── POST /render/batch — render multiple URLs in parallel ──
+  //
+  // Body: { urls: string[], maxChars?: number, concurrency?: number }
+  // Returns: { results: [{ url, title, headings, links, textContent, stats, renderedAt, error? }], timing }
+  //
+  // Renders up to 10 URLs concurrently and returns all results.
+  // Failed URLs return { url, error } instead of throwing.
+  if (method === 'POST' && path === '/render/batch') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+
+    if (!Array.isArray(body.urls) || body.urls.length === 0) {
+      return json(res, 400, { error: 'body.urls must be a non-empty array of URLs' });
+    }
+    if (body.urls.length > 20) {
+      return json(res, 400, { error: 'Maximum 20 URLs per batch' });
+    }
+
+    const maxChars = body.maxChars || 5000;
+    const concurrency = Math.min(body.concurrency || 5, 10);
+    const startTime = Date.now();
+
+    // Render in parallel with concurrency limit
+    const results = [];
+    const queue = [...body.urls];
+    const active = new Set();
+
+    async function renderOne(url) {
+      try {
+        const raw = await render(url);
+        metrics.snapshotsTaken++;
+        return {
+          url: raw.url || url,
+          title: raw.title,
+          headings: raw.headings || [],
+          links: (raw.interactives || []).filter(el => el.tag === 'a').slice(0, 30),
+          forms: raw.forms || [],
+          textContent: (raw.textContent || '').slice(0, maxChars),
+          stats: raw.stats || {},
+          renderedAt: Date.now(),
+        };
+      } catch (e) {
+        metrics.errors++;
+        return { url, error: e.message, renderedAt: Date.now() };
+      }
+    }
+
+    // Process queue with concurrency
+    const allPromises = body.urls.map((url, index) => ({
+      url,
+      index,
+      promise: null,
+    }));
+
+    // Simple parallel execution with concurrency limit
+    const renderResults = new Array(body.urls.length);
+    let cursor = 0;
+
+    async function runBatch() {
+      while (cursor < body.urls.length) {
+        const batch = [];
+        for (let i = 0; i < concurrency && cursor < body.urls.length; i++) {
+          const idx = cursor++;
+          batch.push(renderOne(body.urls[idx]).then(r => { renderResults[idx] = r; }));
+        }
+        await Promise.all(batch);
+      }
+    }
+
+    await runBatch();
+
+    const timing = Date.now() - startTime;
+    const succeeded = renderResults.filter(r => !r.error).length;
+    const failed = renderResults.filter(r => r.error).length;
+
+    return json(res, 200, {
+      results: renderResults,
+      summary: {
+        total: body.urls.length,
+        succeeded,
+        failed,
+        timingMs: timing,
+      },
+    });
+  }
+
+  // ── POST /extract — extract structured data from a URL ──
+  //
+  // Like /render but applies semantic chunking and returns relevance-scored sections.
+  //
+  // Body: { url: string, query?: string, maxChunks?: number }
+  // Returns: { url, title, chunks[], summary }
+  //
+  // If `query` is provided, chunks are scored for relevance to the query.
+  // If no query, returns top chunks by general importance.
+  if (method === 'POST' && path === '/extract') {
+    let body;
+    try { body = await readBody(req); } catch (e) { return json(res, 400, { error: e.message }); }
+    if (!body.url) return json(res, 400, { error: 'body.url is required' });
+
+    try {
+      const raw = await render(body.url);
+      metrics.snapshotsTaken++;
+
+      const pageForChunking = {
+        url: raw.url || body.url,
+        title: raw.title,
+        headings: raw.headings || [],
+        textContent: raw.textContent || '',
+        stats: raw.stats || {},
+        interactives: raw.interactives || [],
+      };
+
+      const maxChunks = Math.max(1, Math.min(50, body.maxChunks || 10));
+      const chunks = chunkPage(pageForChunking, { minScore: -3 });
+
+      let resultChunks;
+      if (body.query && body.query.trim()) {
+        resultChunks = findRelevant(chunks, body.query.trim(), maxChunks);
+      } else {
+        // Sort by score descending, return top N
+        resultChunks = chunks
+          .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+          .slice(0, maxChunks)
+          .map(c => ({ ...c, relevance: c.score ?? 0 }));
+      }
+
+      return json(res, 200, {
+        url: raw.url || body.url,
+        title: raw.title,
+        chunks: resultChunks.map(c => ({
+          type: c.type,
+          text: c.text,
+          section: c.section,
+          relevanceScore: c.relevance ?? c.score ?? 0,
+        })),
+        totalChunks: chunks.length,
+        query: body.query || null,
+        renderedAt: Date.now(),
+      });
+    } catch (e) {
+      metrics.errors++;
+      return json(res, 500, { error: `Extract failed: ${e.message}` });
+    }
+  }
+
   // ── 404 ──
   return json(res, 404, {
     error: 'Not found',
@@ -572,6 +752,9 @@ async function handleRequest(req, res) {
       'POST /watches/:id/query',
       'GET  /watches/:id/query-history',
       'GET  /watches/:id/events',
+      'POST /render',
+      'POST /render/batch',
+      'POST /extract',
     ],
   });
 }
@@ -596,6 +779,9 @@ server.listen(PORT, HOST, () => {
   console.log(`    GET    http://${HOST}:${PORT}/watches           → list watches`);
   console.log(`    GET    http://${HOST}:${PORT}/watches/:id/diff  → get diff`);
   console.log(`    GET    http://${HOST}:${PORT}/events            → SSE change stream`);
+  console.log(`    POST   http://${HOST}:${PORT}/render            → one-shot render`);
+  console.log(`    POST   http://${HOST}:${PORT}/render/batch      → batch render (up to 20 URLs)`);
+  console.log(`    POST   http://${HOST}:${PORT}/extract           → extract + chunk with relevance`);
   console.log(`    GET    http://${HOST}:${PORT}/health            → status`);
 });
 

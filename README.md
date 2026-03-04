@@ -270,6 +270,71 @@ await tracker.close(); // always close when done
 Use the lite backend for static sites and news aggregators; use Playwright for SPAs and
 pages that require login or client-side rendering.
 
+## HTTP API (WatchServer)
+
+Start the server: `npm run watch-server` (port 7376) or `npm run playwright-watch-server` (port 7377).
+
+### One-shot Endpoints
+
+```bash
+# Render a single page (no state, no watch)
+curl -X POST http://localhost:7376/render \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}'
+# → { url, title, headings, links, textContent, stats, renderedAt }
+
+# Render multiple pages in parallel (up to 20)
+curl -X POST http://localhost:7376/render/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"urls": ["https://a.com", "https://b.com"], "maxChars": 3000}'
+# → { results: [...], summary: { total, succeeded, failed, timingMs } }
+
+# Extract + chunk with relevance scoring
+curl -X POST http://localhost:7376/extract \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com", "query": "pricing", "maxChunks": 5}'
+# → { url, title, chunks: [{ type, text, section, relevanceScore }], totalChunks }
+```
+
+### Watch Endpoints
+
+```bash
+# Create a watch (poll every 60s)
+curl -X POST http://localhost:7376/watches \
+  -d '{"url": "https://example.com/prices", "intervalMs": 60000}'
+
+# Get diff since baseline
+curl http://localhost:7376/watches/{id}/diff
+
+# Ask a question about the page
+curl -X POST http://localhost:7376/watches/{id}/query \
+  -d '{"question": "what is the current price?"}'
+
+# SSE change stream
+curl http://localhost:7376/events
+```
+
+### All Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Server status + metrics |
+| GET | `/metrics` | Prometheus-format counters |
+| POST | `/render` | One-shot render (no state) |
+| POST | `/render/batch` | Render up to 20 URLs in parallel |
+| POST | `/extract` | Render + semantic chunking |
+| POST | `/watches` | Create a page watch |
+| GET | `/watches` | List all watches |
+| GET | `/watches/:id` | Watch details |
+| DELETE | `/watches/:id` | Stop a watch |
+| GET | `/watches/:id/diff` | Current diff vs baseline |
+| POST | `/watches/:id/snapshot` | Take immediate snapshot |
+| POST | `/watches/:id/baseline` | Reset baseline |
+| POST | `/watches/:id/query` | Ask question about page |
+| GET | `/watches/:id/query-history` | Past queries + answers |
+| GET | `/events` | SSE stream (all changes) |
+| GET | `/watches/:id/events` | SSE stream (per watch) |
+
 ## Related
 
 - Designed to run on [CarapaceOS](../carapaceos/)
